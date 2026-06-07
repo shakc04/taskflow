@@ -1,12 +1,15 @@
 import { JobQueue } from './core/queue';
 import { Job } from './core/job';
 import { JobStore } from './store/sqlite';
+import { DeadLetterStore } from './store/dlq';
 import { WorkerPool } from './core/worker-pool';
+import { Scheduler } from './core/scheduler';
 import { createServer } from './api/server';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const CONCURRENCY = Number(process.env.CONCURRENCY ?? 4);
 const DB_FILE = process.env.DB_FILE ?? 'taskflow.sqlite';
+const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 1000);
 
 /**
  * Demonstration handler. A real deployment swaps this for domain work keyed on
@@ -24,16 +27,20 @@ async function handle(job: Job): Promise<void> {
 
 function main(): void {
   const store = new JobStore(DB_FILE);
+  const dlq = new DeadLetterStore(store.getConnection());
   const queue = new JobQueue();
-  const pool = new WorkerPool(queue, store, CONCURRENCY, handle);
-  const app = createServer(queue, store, pool);
+  const pool = new WorkerPool(queue, store, CONCURRENCY, handle, { dlq });
+  const scheduler = new Scheduler(store, pool, POLL_INTERVAL_MS);
+  const app = createServer(queue, store, pool, dlq);
 
   pool.start();
+  scheduler.start();
   const server = app.listen(PORT, () => {
     process.stdout.write(`taskflow listening on port ${PORT}\n`);
   });
 
   const shutdown = (): void => {
+    scheduler.stop();
     server.close(() => {
       void pool.stop().then(() => {
         store.close();
